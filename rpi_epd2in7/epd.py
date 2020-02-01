@@ -135,6 +135,7 @@ class EPD(object):
 
     def init(self):
         """ Preform the hardware initialization sequence """
+        print('Initializing hw')
         # Interface initialization:
         GPIO.setmode(GPIO.BCM)
         GPIO.setwarnings(False)
@@ -248,20 +249,23 @@ class EPD(object):
         """ Get a full frame buffer from a PIL Image object """
         image_monocolor = image.convert('1')
         imwidth, imheight = image_monocolor.size
+        print("Imwidth, Imheight", imwidth, imheight)
         if imwidth != self.width or imheight != self.height:
             raise ValueError('Image must be same dimensions as display \
                 ({0}x{1}).' .format(self.width, self.height))
-        return self._get_frame_buffer_for_size(image_monocolor, self.height, self.width)
+        return self._get_frame_buffer_for_size(image_monocolor, self.width, self.height)
 
-    def _get_frame_buffer_for_size(self, image_monocolor, height, width):
+    def _get_frame_buffer_for_size(self, image_monocolor, width, height):
         """ Get a frame buffer object from a PIL Image object assuming a specific size"""
         buf = [0x00] * (width * height // 8)
+        print("Buffer length", len(buf))
         pixels = image_monocolor.load()
+        print("FB Width, Height", width, height)
         for y in range(height):
             for x in range(width):
                 # Set the bits for the column of pixels at the current position
                 if pixels[x, y] != 0:
-                    buf[(x + y * width) // 8] |= (0x80 >> (x % 8))
+                    buf[(x + y * width) // 8] |= (0x80 >> (y % 8))
         return buf
 
     def display_frame(self, image):
@@ -286,7 +290,8 @@ class EPD(object):
         self._last_frame = image.copy()
         self._partial_refresh_count = 0  # reset the partial refreshes counter
 
-    def _send_partial_frame_dimensions(self, x, y, l, w):
+    def _send_partial_frame_dimensions(self, x, y, w, l):
+        print("Partial frame dimensions to send: x,y,w,l", x,y,w,l)
         self.send_data(x >> 8)
         self.send_data(x & 0xf8)
         self.send_data(y >> 8)
@@ -296,7 +301,7 @@ class EPD(object):
         self.send_data(l >> 8)
         self.send_data(l & 0xff)
 
-    def display_partial_frame(self, image, x, y, h, w, fast=False):
+    def display_partial_frame(self, image, x, y, w, h, fast=False):
         """ Display a partial frame, only refreshing the changed area.
 
         `image` is a Pillow Image object
@@ -316,18 +321,20 @@ class EPD(object):
         # adding a few more pixels to the refreshed area.
         # This is mandatory, otherwise the display might get corrupted until
         # the next valid update that touches the same area.
-        x = _nearest_mult_of_8(x, False)
-        w = _nearest_mult_of_8(w)
+        print("Partial frame dimensions start calculation x,y,w,h:",x,y,w,h)
+        y = _nearest_mult_of_8(y, False)
+        h = _nearest_mult_of_8(h, True)
+        print("Partial frame dimensions after round x,y,w,h",x,y,w,h)
 
         self.send_command(PARTIAL_DATA_START_TRANSMISSION_1)
         self.delay_ms(2)
 
-        self._send_partial_frame_dimensions(x, y, h, w)
+        self._send_partial_frame_dimensions(x, y, w, h)
         self.delay_ms(2)
 
         # Send the old values, as per spec
         old_image = self._last_frame.crop((x, y, x+w, y+h))
-        old_fb = self._get_frame_buffer_for_size(old_image, h, w)
+        old_fb = self._get_frame_buffer_for_size(old_image, w, h)
         for i in range(0, w * h // 8):
             self.send_data(old_fb[i])
         self.delay_ms(2)
@@ -335,19 +342,19 @@ class EPD(object):
         self.send_command(PARTIAL_DATA_START_TRANSMISSION_2)
         self.delay_ms(2)
 
-        self._send_partial_frame_dimensions(x, y, h, w)
+        self._send_partial_frame_dimensions(x, y, w, h)
 
         # Send new data
         self._last_frame = image.copy()
         image = image.crop((x, y, x+w, y+h))
-        new_fb = self._get_frame_buffer_for_size(image, h, w)
+        new_fb = self._get_frame_buffer_for_size(image, w, h)
         for i in range(0, w * h // 8):
             self.send_data(new_fb[i])
         self.delay_ms(2)
 
         self.send_command(PARTIAL_DISPLAY_REFRESH)
         self.delay_ms(2)
-        self._send_partial_frame_dimensions(x, y, h, w)
+        self._send_partial_frame_dimensions(x, y, w, h)
         self.wait_until_idle()
         if fast:
             self.set_lut()  # restore LUT to normal mode
@@ -377,17 +384,18 @@ class EPD(object):
             # of the changed area
             difference = ImageChops.difference(self._last_frame, image)
             bbox = difference.getbbox()
+            print("BBox:", bbox)
             if bbox is not None:
                 # the old picture and new picture are different, partial
                 # update is needed.
                 # Get the update area. x and w have to be multiples of 8
                 # as per the spec, so round down for x, and round up for w
-                x = _nearest_mult_of_8(bbox[0], False)
-                y = bbox[1]
-                w = _nearest_mult_of_8(bbox[2] - x)
+                x = bbox[1]
+                y = _nearest_mult_of_8(bbox[0], False)
+                w = bbox[3] - x
                 if w > self.width:
                     w = self.width
-                h = bbox[3] - y
+                h = _nearest_mult_of_8(bbox[2] - y, True)
                 if h > self.height:
                     h = self.height
                 # now let's figure out if fast mode is an option.
@@ -396,7 +404,7 @@ class EPD(object):
                 # Since the image only has one color, meaning each pixel is either
                 # 0 or 255, the following convinent one liner can be used
                 fast = 0 not in self._last_frame.crop(bbox).getdata() and self.fast_refresh
-                self.display_partial_frame(image, x, y, h, w, fast)
+                self.display_partial_frame(image, x, y, w, h, fast)
 
     def sleep(self):
         """Put the chip into a deep-sleep mode to save power.
