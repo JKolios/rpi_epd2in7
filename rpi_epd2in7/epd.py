@@ -31,61 +31,68 @@
 from __future__ import unicode_literals, division, absolute_import
 
 import time
+import io
+
 import spidev
 from .lut import LUT, QuickLUT
 import RPi.GPIO as GPIO
 from PIL import ImageChops
 
 # Pin definition
-RST_PIN         = 17
-DC_PIN          = 25
-CS_PIN          = 8
-BUSY_PIN        = 24
+RST_PIN = 17
+DC_PIN = 25
+CS_PIN = 8
+BUSY_PIN = 24
 
 
 # Display resolution
-EPD_WIDTH       = 176
-EPD_HEIGHT      = 264
+VERTICAL_RESOLUTION = (176, 264)
+HORIZONTAL_RESOLUTION = (264, 176)
 
 # EPD2IN7 commands
 # Specifciation: https://www.waveshare.com/w/upload/2/2d/2.7inch-e-paper-Specification.pdf
-PANEL_SETTING                               = 0x00
-POWER_SETTING                               = 0x01
-POWER_OFF                                   = 0x02
-POWER_OFF_SEQUENCE_SETTING                  = 0x03
-POWER_ON                                    = 0x04
-POWER_ON_MEASURE                            = 0x05
-BOOSTER_SOFT_START                          = 0x06
-DEEP_SLEEP                                  = 0x07
-DATA_START_TRANSMISSION_1                   = 0x10
-DATA_STOP                                   = 0x11
-DISPLAY_REFRESH                             = 0x12
-DATA_START_TRANSMISSION_2                   = 0x13
-PARTIAL_DATA_START_TRANSMISSION_1           = 0x14
-PARTIAL_DATA_START_TRANSMISSION_2           = 0x15
-PARTIAL_DISPLAY_REFRESH                     = 0x16
-LUT_FOR_VCOM                                = 0x20
-LUT_WHITE_TO_WHITE                          = 0x21
-LUT_BLACK_TO_WHITE                          = 0x22
-LUT_WHITE_TO_BLACK                          = 0x23
-LUT_BLACK_TO_BLACK                          = 0x24
-PLL_CONTROL                                 = 0x30
-TEMPERATURE_SENSOR_COMMAND                  = 0x40
-TEMPERATURE_SENSOR_CALIBRATION              = 0x41
-TEMPERATURE_SENSOR_WRITE                    = 0x42
-TEMPERATURE_SENSOR_READ                     = 0x43
-VCOM_AND_DATA_INTERVAL_SETTING              = 0x50
-LOW_POWER_DETECTION                         = 0x51
-TCON_SETTING                                = 0x60
-TCON_RESOLUTION                             = 0x61
-SOURCE_AND_GATE_START_SETTING               = 0x62
-GET_STATUS                                  = 0x71
-AUTO_MEASURE_VCOM                           = 0x80
-VCOM_VALUE                                  = 0x81
-VCM_DC_SETTING_REGISTER                     = 0x82
-PROGRAM_MODE                                = 0xA0
-ACTIVE_PROGRAM                              = 0xA1
-READ_OTP_DATA                               = 0xA2
+PANEL_SETTING = 0x00
+POWER_SETTING = 0x01
+POWER_OFF = 0x02
+POWER_OFF_SEQUENCE_SETTING = 0x03
+POWER_ON = 0x04
+POWER_ON_MEASURE = 0x05
+BOOSTER_SOFT_START = 0x06
+DEEP_SLEEP = 0x07
+DATA_START_TRANSMISSION_1 = 0x10
+DATA_STOP = 0x11
+DISPLAY_REFRESH = 0x12
+DATA_START_TRANSMISSION_2 = 0x13
+PARTIAL_DATA_START_TRANSMISSION_1 = 0x14
+PARTIAL_DATA_START_TRANSMISSION_2 = 0x15
+PARTIAL_DISPLAY_REFRESH = 0x16
+LUT_FOR_VCOM = 0x20
+LUT_WHITE_TO_WHITE = 0x21
+LUT_BLACK_TO_WHITE = 0x22
+LUT_WHITE_TO_BLACK = 0x23
+LUT_BLACK_TO_BLACK = 0x24
+PLL_CONTROL = 0x30
+TEMPERATURE_SENSOR_COMMAND = 0x40
+TEMPERATURE_SENSOR_CALIBRATION = 0x41
+TEMPERATURE_SENSOR_WRITE = 0x42
+TEMPERATURE_SENSOR_READ = 0x43
+VCOM_AND_DATA_INTERVAL_SETTING = 0x50
+LOW_POWER_DETECTION = 0x51
+TCON_SETTING = 0x60
+TCON_RESOLUTION = 0x61
+SOURCE_AND_GATE_START_SETTING = 0x62
+GET_STATUS = 0x71
+AUTO_MEASURE_VCOM = 0x80
+VCOM_VALUE = 0x81
+VCM_DC_SETTING_REGISTER = 0x82
+PROGRAM_MODE = 0xA0
+ACTIVE_PROGRAM = 0xA1
+READ_OTP_DATA = 0xA2
+
+VERTICAL_MODE = 0
+# Image data transmitted in this order (x,y): [0,0], [1,0] ... [WIDTH-1, 0] ... [0,1] ... [WIDTH-1, HEIGHT-1]
+HORIZONTAL_MODE = 1
+# Image data transmitted in this order (x,y): [0,0], [0,1] ... [0, HEIGHT-1] ... [1,0] ... [WIDTH-1, HEIGHT-1]
 
 
 def _nearest_mult_of_8(number, up=True):
@@ -97,19 +104,21 @@ def _nearest_mult_of_8(number, up=True):
 
 
 class EPD(object):
-    def __init__(self, partial_refresh_limit=32, fast_refresh=True):
+    def __init__(self, partial_refresh_limit=32, fast_refresh=True, mode=VERTICAL_MODE):
         """ Initialize the EPD class.
         `partial_refresh_limit` - number of partial refreshes before a full refrersh is forced
         `fast_frefresh` - enable or disable the fast refresh mode,
                           see smart_update() method documentation for details"""
-        self.width = EPD_WIDTH
+        self.mode = mode
+        """ horizontal or vertical display mode """
+        self.width = VERTICAL_RESOLUTION[0] if self.mode == VERTICAL_MODE else HORIZONTAL_RESOLUTION[0]
         """ Display width, in pixels """
-        self.height = EPD_HEIGHT
+        self.height = VERTICAL_RESOLUTION[1] if self.mode == VERTICAL_MODE else HORIZONTAL_RESOLUTION[1]
         """ Display height, in pixels """
         self.fast_refresh = fast_refresh
         """ enable or disable the fast refresh mode """
         self.partial_refresh_limit = partial_refresh_limit
-        """ number of partial refreshes before a full refrersh is forced """
+        """ number of partial refreshes before a full refresh is forced """
 
         self._last_frame = None
         self._partial_refresh_count = 0
@@ -255,13 +264,20 @@ class EPD(object):
 
     def _get_frame_buffer_for_size(self, image_monocolor, height, width):
         """ Get a frame buffer object from a PIL Image object assuming a specific size"""
-        buf = [0x00] * (width * height // 8)
+        if self.mode == HORIZONTAL_MODE:
+            return self._horizontal_frame_buffer(image_monocolor, height, width)
+        return image_monocolor.tobytes()
+
+    def _horizontal_frame_buffer(self, image_monocolor, height, width):
+        buf = [0xFF] * (int(width/8) * height)
         pixels = image_monocolor.load()
         for y in range(height):
             for x in range(width):
-                # Set the bits for the column of pixels at the current position
-                if pixels[x, y] != 0:
-                    buf[(x + y * width) // 8] |= (0x80 >> (x % 8))
+                newx = y
+                newy = height - x - 1
+                if pixels[x, y] == 0:
+                    buf[int((newx + newy * width) / 8)
+                        ] &= ~(0x80 >> (y % 8))
         return buf
 
     def display_frame(self, image):
@@ -287,6 +303,7 @@ class EPD(object):
         self._partial_refresh_count = 0  # reset the partial refreshes counter
 
     def _send_partial_frame_dimensions(self, x, y, l, w):
+        print("PFD:", x, y, w, l)
         self.send_data(x >> 8)
         self.send_data(x & 0xf8)
         self.send_data(y >> 8)
@@ -382,6 +399,7 @@ class EPD(object):
                 # update is needed.
                 # Get the update area. x and w have to be multiples of 8
                 # as per the spec, so round down for x, and round up for w
+                print("BBox:", bbox)
                 x = _nearest_mult_of_8(bbox[0], False)
                 y = bbox[1]
                 w = _nearest_mult_of_8(bbox[2] - x)
@@ -395,7 +413,9 @@ class EPD(object):
                 # otherwise, a slow refresh will be used (to avoid ghosting).
                 # Since the image only has one color, meaning each pixel is either
                 # 0 or 255, the following convinent one liner can be used
-                fast = 0 not in self._last_frame.crop(bbox).getdata() and self.fast_refresh
+                print("x,y,h,w:", x,y,h,w)
+                fast = 0 not in self._last_frame.crop(
+                    bbox).getdata() and self.fast_refresh
                 self.display_partial_frame(image, x, y, h, w, fast)
 
     def sleep(self):
@@ -404,4 +424,5 @@ class EPD(object):
         Use EPD.reset() to awaken and use EPD.init() to initialize. """
         self.send_command(DEEP_SLEEP)
         self.delay_ms(2)
-        self.send_data(0xa5)  # deep sleep requires 0xa5 as a "check code" parameter
+        # deep sleep requires 0xa5 as a "check code" parameter
+        self.send_data(0xa5)
