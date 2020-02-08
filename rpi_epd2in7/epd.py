@@ -36,7 +36,8 @@ import io
 import spidev
 from .lut import LUT, QuickLUT
 import RPi.GPIO as GPIO
-from PIL import ImageChops
+from PIL import ImageChops, Image
+import ipdb
 
 # Pin definition
 RST_PIN = 17
@@ -46,8 +47,7 @@ BUSY_PIN = 24
 
 
 # Display resolution
-VERTICAL_RESOLUTION = (176, 264)
-HORIZONTAL_RESOLUTION = (264, 176)
+RESOLUTION = (176, 264)
 
 # EPD2IN7 commands
 # Specifciation: https://www.waveshare.com/w/upload/2/2d/2.7inch-e-paper-Specification.pdf
@@ -111,9 +111,9 @@ class EPD(object):
                           see smart_update() method documentation for details"""
         self.mode = mode
         """ horizontal or vertical display mode """
-        self.width = VERTICAL_RESOLUTION[0] if self.mode == VERTICAL_MODE else HORIZONTAL_RESOLUTION[0]
+        self.width = RESOLUTION[0]
         """ Display width, in pixels """
-        self.height = VERTICAL_RESOLUTION[1] if self.mode == VERTICAL_MODE else HORIZONTAL_RESOLUTION[1]
+        self.height = RESOLUTION[1]
         """ Display height, in pixels """
         self.fast_refresh = fast_refresh
         """ enable or disable the fast refresh mode """
@@ -256,29 +256,7 @@ class EPD(object):
     def _get_frame_buffer(self, image):
         """ Get a full frame buffer from a PIL Image object """
         image_monocolor = image.convert('1')
-        imwidth, imheight = image_monocolor.size
-        if imwidth != self.width or imheight != self.height:
-            raise ValueError('Image must be same dimensions as display \
-                ({0}x{1}).' .format(self.width, self.height))
-        return self._get_frame_buffer_for_size(image_monocolor, self.height, self.width)
-
-    def _get_frame_buffer_for_size(self, image_monocolor, height, width):
-        """ Get a frame buffer object from a PIL Image object assuming a specific size"""
-        if self.mode == HORIZONTAL_MODE:
-            return self._horizontal_frame_buffer(image_monocolor, height, width)
         return image_monocolor.tobytes()
-
-    def _horizontal_frame_buffer(self, image_monocolor, height, width):
-        buf = [0xFF] * (int(width/8) * height)
-        pixels = image_monocolor.load()
-        for y in range(height):
-            for x in range(width):
-                newx = y
-                newy = height - x - 1
-                if pixels[x, y] == 0:
-                    buf[int((newx + newy * width) / 8)
-                        ] &= ~(0x80 >> (y % 8))
-        return buf
 
     def display_frame(self, image):
         """ Display a full frame, doing a full screen refresh """
@@ -289,13 +267,11 @@ class EPD(object):
         frame_buffer = self._get_frame_buffer(image)
         self.send_command(DATA_START_TRANSMISSION_1)
         self.delay_ms(2)
-        for _ in range(0, self.width * self.height // 8):
-            self.send_data(0xFF)
+        self._send_blank_img_data()
         self.delay_ms(2)
         self.send_command(DATA_START_TRANSMISSION_2)
         self.delay_ms(2)
-        for i in range(0, self.width * self.height // 8):
-            self.send_data(frame_buffer[i])
+        self._send_img_data(frame_buffer)
         self.delay_ms(2)
         self.send_command(DISPLAY_REFRESH)
         self.wait_until_idle()
@@ -344,9 +320,8 @@ class EPD(object):
 
         # Send the old values, as per spec
         old_image = self._last_frame.crop((x, y, x+w, y+h))
-        old_fb = self._get_frame_buffer_for_size(old_image, h, w)
-        for i in range(0, w * h // 8):
-            self.send_data(old_fb[i])
+        old_fb = self._get_frame_buffer(old_image)
+        self._send_img_data(old_fb, height=h, width=w)
         self.delay_ms(2)
 
         self.send_command(PARTIAL_DATA_START_TRANSMISSION_2)
@@ -357,9 +332,8 @@ class EPD(object):
         # Send new data
         self._last_frame = image.copy()
         image = image.crop((x, y, x+w, y+h))
-        new_fb = self._get_frame_buffer_for_size(image, h, w)
-        for i in range(0, w * h // 8):
-            self.send_data(new_fb[i])
+        new_fb = self._get_frame_buffer(image)
+        self._send_img_data(new_fb, height=h, width=w)
         self.delay_ms(2)
 
         self.send_command(PARTIAL_DISPLAY_REFRESH)
@@ -412,11 +386,22 @@ class EPD(object):
                 # If the area was all white before - fast mode will be used.
                 # otherwise, a slow refresh will be used (to avoid ghosting).
                 # Since the image only has one color, meaning each pixel is either
-                # 0 or 255, the following convinent one liner can be used
-                print("x,y,h,w:", x,y,h,w)
+                # 0 or 255, the following convenient one liner can be used
+                print("x,y,h,w:", x, y, h, w)
                 fast = 0 not in self._last_frame.crop(
                     bbox).getdata() and self.fast_refresh
                 self.display_partial_frame(image, x, y, h, w, fast)
+
+    def _send_blank_img_data(self):
+        blank_fb = [0xFF] * (self.width * self.height // 8)
+        self._send_img_data(blank_fb)
+
+    def _send_img_data(self, frame_buffer, width=None, height=None):
+        width = self.width if width is None else width
+        height = self.height if height is None else height
+
+        for i in range(0, width * height // 8):
+            self.send_data(frame_buffer[i])
 
     def sleep(self):
         """Put the chip into a deep-sleep mode to save power.
