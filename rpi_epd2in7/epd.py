@@ -89,9 +89,7 @@ PROGRAM_MODE = 0xA0
 ACTIVE_PROGRAM = 0xA1
 READ_OTP_DATA = 0xA2
 
-VERTICAL_MODE = 0
 # Image data transmitted in this order (x,y): [0,0], [1,0] ... [WIDTH-1, 0] ... [0,1] ... [WIDTH-1, HEIGHT-1]
-HORIZONTAL_MODE = 1
 # Image data transmitted in this order (x,y): [0,0], [0,1] ... [0, HEIGHT-1] ... [1,0] ... [WIDTH-1, HEIGHT-1]
 
 
@@ -104,13 +102,11 @@ def _nearest_mult_of_8(number, up=True):
 
 
 class EPD(object):
-    def __init__(self, partial_refresh_limit=32, fast_refresh=True, mode=VERTICAL_MODE):
+    def __init__(self, partial_refresh_limit=32, fast_refresh=True):
         """ Initialize the EPD class.
         `partial_refresh_limit` - number of partial refreshes before a full refrersh is forced
         `fast_frefresh` - enable or disable the fast refresh mode,
                           see smart_update() method documentation for details"""
-        self.mode = mode
-        """ horizontal or vertical display mode """
         self.width = RESOLUTION[0]
         """ Display width, in pixels """
         self.height = RESOLUTION[1]
